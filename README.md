@@ -57,9 +57,9 @@
 5.  **Run Migrations & Server:**
     ```bash
     python manage.py migrate
-    python manage.py runserver 8000
+    python manage.py runserver 8002
     ```
-    *The API will be available at `http://localhost:8000`*
+    *The API will be available at `http://localhost:8002`*
 
 6.  **Run Celery Worker (Required for Downloads):**
     Open a new terminal, activate venv, and run:
