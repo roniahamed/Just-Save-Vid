@@ -38,7 +38,13 @@ export default function Home() {
 
   return (
     <main className="pb-20">
-      <Hero onAnalyzeSuccess={handleAnalyzeSuccess} />
+      <Hero
+        onAnalyzeStart={() => {
+          setData(null);
+          setVideoUrl("");
+        }}
+        onAnalyzeSuccess={handleAnalyzeSuccess}
+      />
 
       <div id="results" className="mx-auto max-w-6xl px-4 md:px-6">
         {data && videoUrl ? <ResultCard data={data} videoUrl={videoUrl} /> : null}

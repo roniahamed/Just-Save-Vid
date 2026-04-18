@@ -3,6 +3,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.http import FileResponse
 from celery.result import AsyncResult
+from kombu.exceptions import OperationalError
+from redis.exceptions import RedisError
+from core.celery import app as celery_app
 from .services import VideoDownloaderService
 from .serializers import AnalyzeSerializer, DownloadSerializer
 from .utils import FileCleanupWrapper
@@ -11,6 +14,18 @@ import os
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _any_celery_worker_online() -> bool:
+    """Best-effort check whether at least one Celery worker is reachable."""
+    try:
+        inspector = celery_app.control.inspect(timeout=1.0)
+        replies = inspector.ping() if inspector else None
+        return bool(replies)
+    except Exception:
+        # Don't block downloads if the ping check itself fails for some reason;
+        # dispatch will still raise if the broker is unavailable.
+        return True
 
 class AnalyzeView(APIView):
     def post(self, request):
@@ -42,9 +57,24 @@ class DownloadView(APIView):
         if serializer.is_valid():
             url = serializer.validated_data['url']
             format_id = serializer.validated_data['format_id']
+
+            if not _any_celery_worker_online():
+                return Response(
+                    {
+                        "error": "Celery worker is not running. Start a worker and try again.",
+                        "hint": "From backend/: source env/bin/activate (or your venv) && celery -A core worker --loglevel=info",
+                    },
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
             
-            # Dispatch Async Task
-            task = download_video_task.delay(url, format_id)
+            try:
+                # Dispatch Async Task
+                task = download_video_task.delay(url, format_id)
+            except (OperationalError, RedisError) as exc:
+                logger.error(f"Download dispatch error: {exc}")
+                return Response({
+                    "error": "Download queue is unavailable. Start Redis and the Celery worker, then try again."
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             
             return Response({
                 "task_id": task.id,
@@ -59,19 +89,28 @@ class TaskStatusView(APIView):
         """
         Check the status of a download task.
         """
-        result = AsyncResult(task_id)
+        try:
+            result = AsyncResult(task_id)
+            state = result.state
+        except (OperationalError, RedisError) as exc:
+            logger.error(f"Task status error: {exc}")
+            return Response({
+                "task_id": task_id,
+                "status": "UNAVAILABLE",
+                "error": "Download queue is unavailable. Start Redis and the Celery worker, then try again."
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         
         response_data = {
             "task_id": task_id,
-            "status": result.state,
+            "status": state,
         }
 
-        if result.state == 'SUCCESS':
+        if state == 'SUCCESS':
             # Construct the retrieve URL
             # In a real app, use reverse(). For now, simple string construction.
             # We assume the client knows where to go, or we provide the link.
             response_data['download_url'] = f"/api/v1/retrieve/{task_id}/"
-        elif result.state == 'FAILURE':
+        elif state == 'FAILURE':
             response_data['error'] = str(result.result)
 
         return Response(response_data)
@@ -81,9 +120,16 @@ class FileRetrieveView(APIView):
         """
         Retrieve the downloaded file (once task is SUCCESS).
         """
-        result = AsyncResult(task_id)
+        try:
+            result = AsyncResult(task_id)
+            state = result.state
+        except (OperationalError, RedisError) as exc:
+            logger.error(f"File retrieve error: {exc}")
+            return Response({
+                "error": "Download queue is unavailable. Start Redis and the Celery worker, then try again."
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         
-        if result.state != 'SUCCESS':
+        if state != 'SUCCESS':
             return Response({"error": "Task not ready or failed"}, status=status.HTTP_400_BAD_REQUEST)
         
         # Result is the dict we returned in tasks.py

@@ -14,9 +14,10 @@ import { siteName, siteTagline, stats, supportedSources } from "@/lib/site";
 
 interface HeroProps {
   onAnalyzeSuccess: (data: VideoInfo, url: string) => void;
+  onAnalyzeStart?: () => void;
 }
 
-export const Hero: React.FC<HeroProps> = ({ onAnalyzeSuccess }) => {
+export const Hero: React.FC<HeroProps> = ({ onAnalyzeSuccess, onAnalyzeStart }) => {
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -50,6 +51,7 @@ export const Hero: React.FC<HeroProps> = ({ onAnalyzeSuccess }) => {
       return;
     }
 
+    onAnalyzeStart?.();
     setLoading(true);
     setError("");
 

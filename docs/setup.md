@@ -21,6 +21,15 @@ DEBUG=True
 SECRET_KEY=your-secret-key-here
 ALLOWED_HOSTS=localhost,127.0.0.1
 REDIS_URL=redis://localhost:6379/1
+
+# Optional (helps with some YouTube 403 / age-restricted videos on your own machine)
+# YTDLP_COOKIES_FROM_BROWSER=chrome
+
+# Optional (try multiple YouTube client profiles; can reduce 403 on some videos)
+# YTDLP_YOUTUBE_PLAYER_CLIENTS=android,ios,web
+
+# Optional (controls filename truncation length)
+# YTDLP_TITLE_MAXLEN=80
 ```
 
 ### 2. Installation

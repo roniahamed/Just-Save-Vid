@@ -4,17 +4,50 @@ import shutil
 import logging
 import yt_dlp
 from django.conf import settings
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 class VideoDownloaderService:
     def __init__(self):
+        title_max_len = 80
+        try:
+            configured_len = int(os.environ.get('YTDLP_TITLE_MAXLEN', title_max_len))
+            title_max_len = max(20, min(200, configured_len))
+        except (TypeError, ValueError):
+            title_max_len = 80
+
+        cookies_from_browser = os.environ.get('YTDLP_COOKIES_FROM_BROWSER', '').strip()
+        youtube_clients_raw = os.environ.get('YTDLP_YOUTUBE_PLAYER_CLIENTS', 'android,ios,web').strip()
+        youtube_clients = [c.strip() for c in youtube_clients_raw.split(',') if c.strip()]
+
         self.base_opts = {
             'quiet': True,
             'noplaylist': True,
             'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            # yt-dlp enables only Deno by default. Explicitly enabling Node avoids
+            # degraded YouTube extraction on systems without Deno installed.
+            'js_runtimes': {
+                'node': {},
+            },
+            # Avoid pathological filename issues with very long titles
+            'trim_file_name': title_max_len,
         }
+
+        # Some YouTube videos fail with certain web clients (403/blocked formats).
+        # Try multiple client profiles to improve reliability.
+        if youtube_clients:
+            self.base_opts['extractor_args'] = {
+                **(self.base_opts.get('extractor_args') or {}),
+                'youtube': {
+                    'player_client': youtube_clients,
+                },
+            }
+
+        # Optional: allow authenticated/age-restricted downloads in local setups.
+        # Example: YTDLP_COOKIES_FROM_BROWSER=chrome
+        # Note: this reads cookies from the machine running the backend.
+        if cookies_from_browser:
+            self.base_opts['cookiesfrombrowser'] = (cookies_from_browser,)
 
     def _get_filesize_str(self, filesize):
         if not filesize:
@@ -127,37 +160,42 @@ class VideoDownloaderService:
 
         # Merge output format to MP4 if needed
         if '+' in format_id or opts.get('format', '') == 'bestvideo+bestaudio/best':
-             opts['merge_output_format'] = 'mp4'
+            opts['merge_output_format'] = 'mp4'
 
-        # Limit filename length to 50 characters to prevent filesystem errors (especially with Unicode)
-        opts['outtmpl'] = str(temp_dir / '%(title).50s.%(ext)s')
-        opts['trim_file_name'] = 50
-        
-        save_path = None
+        # Limit filename length to prevent filesystem errors (especially with Unicode)
+        title_max_len = int(opts.get('trim_file_name') or 80)
+        opts['outtmpl'] = str(temp_dir / f'%(title).{title_max_len}s.%(ext)s')
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                
-                # Check extension drift after merge
-                if opts.get('merge_output_format') == 'mp4':
-                     path_obj = Path(filename)
-                     if path_obj.suffix != '.mp4':
-                         filename = str(path_obj.with_suffix('.mp4'))
-                
-                save_path = filename
+                ydl.extract_info(url, download=True)
 
-            if save_path and os.path.exists(save_path):
-                return save_path, temp_dir
-            else:
-                 # Fallback search
-                 files = list(temp_dir.glob('*'))
-                 if files:
-                     return str(files[0]), temp_dir
-                 raise Exception("File not found after download.")
+            # Don't guess the final filename (merges can change extension).
+            # Pick the actual produced file from the temp folder.
+            candidates = []
+            for path in temp_dir.rglob('*'):
+                if not path.is_file():
+                    continue
+                name = path.name
+                if name.endswith('.part') or name.endswith('.ytdl'):
+                    continue
+                candidates.append(path)
+
+            if not candidates:
+                raise Exception("File not found after download.")
+
+            best_path = max(candidates, key=lambda p: (p.stat().st_size, p.stat().st_mtime))
+            return str(best_path), temp_dir
 
         except Exception as e:
             if temp_dir.exists():
                 shutil.rmtree(temp_dir)
-            raise Exception(f"Download failed: {str(e)}")
+
+            msg = str(e)
+            if 'HTTP Error 403' in msg or '403: Forbidden' in msg:
+                raise Exception(
+                    "Download failed: HTTP 403 Forbidden. This video may require login/cookies, be age/region restricted, or temporarily blocked. "
+                    "If this is your own browser session, you can set YTDLP_COOKIES_FROM_BROWSER (e.g. chrome) on the backend machine and retry."
+                )
+
+            raise Exception(f"Download failed: {msg}")
